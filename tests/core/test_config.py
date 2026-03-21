@@ -31,6 +31,7 @@ def test_default_config_dump():
                 "max_steps_per_turn": 100,
                 "max_retries_per_step": 3,
                 "max_ralph_iterations": 0,
+                "compaction_model": None,
                 "reserved_context_size": 50000,
                 "compaction_trigger_ratio": 0.85,
             },
@@ -127,3 +128,22 @@ def test_load_config_compaction_trigger_ratio_too_low():
 def test_load_config_compaction_trigger_ratio_too_high():
     with pytest.raises(ConfigError, match="compaction_trigger_ratio"):
         load_config_from_string('{"loop_control": {"compaction_trigger_ratio": 1.0}}')
+
+
+def test_load_config_compaction_model():
+    config = load_config_from_string(
+        '{"providers": {"p": {"type": "_echo", "base_url": "", "api_key": "k"}, '
+        '"models": {"base": {"provider": "p", "model": "base", "max_context_size": 1000}, '
+        '"compact": {"provider": "p", "model": "compact", "max_context_size": 1000}}, '
+        '"loop_control": {"compaction_model": "compact"}}'
+    )
+    assert config.loop_control.compaction_model == "compact"
+
+
+def test_load_config_invalid_compaction_model():
+    with pytest.raises(ConfigError, match="Compaction model unknown not found in models"):
+        load_config_from_string(
+            '{"providers": {"p": {"type": "_echo", "base_url": "", "api_key": "k"}, '
+            '"models": {"base": {"provider": "p", "model": "base", "max_context_size": 1000}, '
+            '"loop_control": {"compaction_model": "unknown"}}'
+        )

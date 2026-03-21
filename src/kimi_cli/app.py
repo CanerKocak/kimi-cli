@@ -127,6 +127,8 @@ class KimiCLI:
 
         model: LLMModel | None = None
         provider: LLMProvider | None = None
+        compaction_model: LLMModel | None = None
+        compaction_provider: LLMProvider | None = None
 
         # try to use config file
         if not model_name and config.default_model:
@@ -142,10 +144,16 @@ class KimiCLI:
             model = LLMModel(provider="", model="", max_context_size=100_000)
             provider = LLMProvider(type="kimi", base_url="", api_key=SecretStr(""))
 
+        if config.loop_control.compaction_model is not None:
+            compaction_model_name = config.loop_control.compaction_model
+            compaction_model = config.models[compaction_model_name].model_copy(deep=True)
+            compaction_provider = config.providers[compaction_model.provider].model_copy(deep=True)
         # try overwrite with environment variables
         assert provider is not None
         assert model is not None
         env_overrides = augment_provider_with_env_vars(provider, model)
+        if compaction_provider is not None and compaction_model is not None:
+            augment_provider_with_env_vars(compaction_provider, compaction_model)
 
         # determine thinking mode
         thinking = config.default_thinking if thinking is None else thinking
@@ -160,6 +168,17 @@ class KimiCLI:
             session_id=session.id,
             oauth=oauth,
         )
+        compaction_llm = llm
+        if compaction_provider is not None and compaction_model is not None:
+            compaction_llm = create_llm(
+                compaction_provider,
+                compaction_model,
+                thinking=thinking,
+                session_id=session.id,
+                oauth=oauth,
+            )
+            if compaction_llm is not None:
+                logger.info("Using compaction LLM model: {model}", model=compaction_model.model)
         if llm is not None:
             logger.info("Using LLM provider: {provider}", provider=provider)
             logger.info("Using LLM model: {model}", model=model)
@@ -168,7 +187,15 @@ class KimiCLI:
         if startup_progress is not None:
             startup_progress("Scanning workspace...")
 
-        runtime = await Runtime.create(config, oauth, llm, session, yolo, skills_dir)
+        runtime = await Runtime.create(
+            config,
+            oauth,
+            llm,
+            compaction_llm=compaction_llm,
+            session=session,
+            yolo=yolo,
+            skills_dir=skills_dir,
+        )
         runtime.notifications.recover()
         runtime.background_tasks.reconcile()
 

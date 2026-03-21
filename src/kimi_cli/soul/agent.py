@@ -71,6 +71,7 @@ class Runtime:
     config: Config
     oauth: OAuthManager
     llm: LLM | None  # we do not freeze the `Runtime` dataclass because LLM can be changed
+    compaction_llm: LLM | None = None
     session: Session
     builtin_args: BuiltinSystemPromptArgs
     denwa_renji: DenwaRenji
@@ -90,6 +91,7 @@ class Runtime:
         llm: LLM | None,
         session: Session,
         yolo: bool,
+        compaction_llm: LLM | None = None,
         skills_dir: KaosPath | None = None,
     ) -> Runtime:
         ls_output, agents_md, environment = await asyncio.gather(
@@ -169,6 +171,7 @@ class Runtime:
             config=config,
             oauth=oauth,
             llm=llm,
+            compaction_llm=compaction_llm,
             session=session,
             builtin_args=BuiltinSystemPromptArgs(
                 KIMI_NOW=datetime.now().astimezone().isoformat(),
@@ -199,6 +202,7 @@ class Runtime:
             config=self.config,
             oauth=self.oauth,
             llm=self.llm,
+            compaction_llm=self.compaction_llm,
             session=self.session,
             builtin_args=self.builtin_args,
             denwa_renji=DenwaRenji(),  # subagent must have its own DenwaRenji
@@ -219,6 +223,7 @@ class Runtime:
             config=self.config,
             oauth=self.oauth,
             llm=self.llm,
+            compaction_llm=self.compaction_llm,
             session=self.session,
             builtin_args=self.builtin_args,
             denwa_renji=DenwaRenji(),  # subagent must have its own DenwaRenji

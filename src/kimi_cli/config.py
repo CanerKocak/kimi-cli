@@ -78,6 +78,8 @@ class LoopControl(BaseModel):
     """Maximum number of retries in one step"""
     max_ralph_iterations: int = Field(default=0, ge=-1)
     """Extra iterations after the first turn in Ralph mode. Use -1 for unlimited."""
+    compaction_model: str | None = Field(default=None)
+    """Optional separate model name to use for compaction."""
     reserved_context_size: int = Field(default=50_000, ge=1000)
     """Reserved token count for LLM response generation. Auto-compaction triggers when
     either context_tokens + reserved_context_size >= max_context_size or
@@ -210,6 +212,12 @@ class Config(BaseModel):
         for model in self.models.values():
             if model.provider not in self.providers:
                 raise ValueError(f"Provider {model.provider} not found in providers")
+        if self.loop_control.compaction_model is not None and (
+            self.loop_control.compaction_model not in self.models
+        ):
+            raise ValueError(
+                f"Compaction model {self.loop_control.compaction_model} not found in models"
+            )
         return self
 
 

@@ -70,6 +70,34 @@ class _SequenceProvider:
         return self
 
 
+class _TrackedSequenceProvider:
+    def __init__(self, model_name: str, response_text: str) -> None:
+        self._model_name = model_name
+        self._response_text = response_text
+        self.calls = 0
+        self._parts = [TextPart(text=response_text)]
+
+    @property
+    def model_name(self) -> str:
+        return self._model_name
+
+    @property
+    def thinking_effort(self) -> ThinkingEffort | None:
+        return None
+
+    async def generate(
+        self,
+        system_prompt: str,
+        tools: Sequence[object],
+        history: Sequence[Message],
+    ) -> _SequenceStream:
+        self.calls += 1
+        return _SequenceStream(self._parts)
+
+    def with_thinking(self, effort: ThinkingEffort) -> Self:
+        return self
+
+
 def _runtime_with_llm(runtime: Runtime, llm: LLM) -> Runtime:
     return Runtime(
         config=runtime.config,
@@ -100,6 +128,21 @@ def _make_soul(runtime: Runtime, tmp_path: Path) -> tuple[KimiSoul, Context]:
         system_prompt="System prompt.",
         toolset=EmptyToolset(),
         runtime=_runtime_with_llm(runtime, llm),
+    )
+    context = Context(file_backend=tmp_path / "history.jsonl")
+    return KimiSoul(agent, context=context), context
+
+
+def _make_soul_with_compaction_llm(
+    runtime: Runtime, main_llm: LLM, compaction_llm: LLM, tmp_path: Path
+) -> tuple[KimiSoul, Context]:
+    runtime = _runtime_with_llm(runtime, main_llm)
+    runtime.compaction_llm = compaction_llm
+    agent = Agent(
+        name="Notification Compaction Agent",
+        system_prompt="System prompt.",
+        toolset=EmptyToolset(),
+        runtime=runtime,
     )
     context = Context(file_backend=tmp_path / "history.jsonl")
     return KimiSoul(agent, context=context), context
@@ -281,3 +324,44 @@ async def test_compaction_appends_active_task_snapshot(runtime: Runtime, tmp_pat
     texts = [message.extract_text("\n") for message in context.history]
     assert any("<active-background-tasks>" in text for text in texts)
     assert any("task_id: b3333345" in text for text in texts)
+
+
+@pytest.mark.asyncio
+async def test_compaction_uses_compaction_llm(runtime: Runtime, tmp_path: Path) -> None:
+    main_provider = _TrackedSequenceProvider(model_name="main-model", response_text="main")
+    compaction_provider = _TrackedSequenceProvider(
+        model_name="compact-model", response_text="compact"
+    )
+    soul, context = _make_soul_with_compaction_llm(
+        runtime,
+        LLM(
+            chat_provider=main_provider,
+            max_context_size=100_000,
+            capabilities=set(),
+        ),
+        LLM(
+            chat_provider=compaction_provider,
+            max_context_size=50_000,
+            capabilities=set(),
+        ),
+        tmp_path,
+    )
+
+    await context.append_message(
+        [
+            Message(role="user", content=[TextPart(text="message 1")]),
+            Message(role="assistant", content=[TextPart(text="message 2")]),
+            Message(role="user", content=[TextPart(text="message 3")]),
+            Message(role="assistant", content=[TextPart(text="message 4")]),
+        ]
+    )
+
+    wire = Wire()
+    token = _current_wire.set(wire)
+    try:
+        await soul.compact_context()
+    finally:
+        _current_wire.reset(token)
+
+    assert main_provider.calls == 0
+    assert compaction_provider.calls == 1
