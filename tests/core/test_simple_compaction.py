@@ -7,16 +7,13 @@ from kosong.chat_provider.echo import EchoChatProvider
 from kosong.message import AudioURLPart, ImageURLPart, Message, VideoURLPart
 from pydantic import SecretStr
 
+import kimi_cli.compactors.morph as morph_module
 import kimi_cli.prompts as prompts
-import kimi_cli.soul.compaction as compaction_module
+from kimi_cli.compactors import load_compactor
+from kimi_cli.compactors.morph import MORPH_COMPACTION_QUERY, MorphCompaction
 from kimi_cli.config import LLMModel, LLMProvider
 from kimi_cli.llm import LLM
-from kimi_cli.soul.compaction import (
-    MORPH_COMPACTION_QUERY,
-    CompactionResult,
-    SimpleCompaction,
-    should_auto_compact,
-)
+from kimi_cli.soul.compaction import CompactionResult, SimpleCompaction, should_auto_compact
 from kimi_cli.wire.types import TextPart, ThinkPart
 
 
@@ -287,6 +284,26 @@ def test_prepare_preserves_media_parts_in_recent_messages():
     assert any(isinstance(p, VideoURLPart) for p in preserved_user_msg.content)
 
 
+def test_load_compactor_auto_selects_morph_for_morph_llm():
+    llm = LLM(
+        chat_provider=EchoChatProvider(),
+        max_context_size=16_000,
+        capabilities=set(),
+        model_config=LLMModel(
+            provider="morph",
+            model="morph-compactor",
+            max_context_size=1_000_000,
+        ),
+        provider_config=LLMProvider(
+            type="openai_responses",
+            base_url="https://api.morphllm.com/v1",
+            api_key=SecretStr("morph-test-key"),
+        ),
+    )
+
+    assert isinstance(load_compactor(None, llm), MorphCompaction)
+
+
 @pytest.mark.asyncio
 async def test_compact_uses_morph_native_endpoint_and_preserves_recent_tail(monkeypatch):
     captured: dict[str, object] = {}
@@ -323,7 +340,7 @@ async def test_compact_uses_morph_native_endpoint_and_preserves_recent_tail(monk
             captured["json"] = json
             return DummyResponse()
 
-    monkeypatch.setattr(compaction_module.httpx, "AsyncClient", DummyAsyncClient)
+    monkeypatch.setattr(morph_module.httpx, "AsyncClient", DummyAsyncClient)
 
     llm = LLM(
         chat_provider=EchoChatProvider(),
@@ -353,7 +370,7 @@ async def test_compact_uses_morph_native_endpoint_and_preserves_recent_tail(monk
         Message(role="assistant", content=[TextPart(text="Latest answer")]),
     ]
 
-    result = await SimpleCompaction(max_preserved_messages=2).compact(
+    result = await MorphCompaction(max_preserved_messages=2).compact(
         messages,
         llm,
         custom_instruction="Keep mention of the current migration plan",

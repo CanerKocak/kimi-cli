@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, NamedTuple, Protocol, runtime_checkable
 
-from kosong.chat_provider import ChatProviderError, TokenUsage
+import kosong
+from kosong.chat_provider import TokenUsage
 from kosong.message import Message
 from kosong.tooling.empty import EmptyToolset
 
@@ -23,14 +24,13 @@ class CompactionResult(NamedTuple):
         """Estimate the token count of the compacted messages.
 
         When LLM usage is available, ``usage.output`` gives the exact token count
-        of the generated summary (the first message).  Preserved messages (all
+        of the generated summary (the first message). Preserved messages (all
         subsequent messages) are estimated from their text length.
 
         When usage is not available (no compaction LLM call was made), all
         messages are estimated from text length.
 
-        The estimate is intentionally conservative — it will be replaced by the
-        real value on the next LLM call.
+        The estimate is intentionally conservative. The next LLM call will replace it.
         """
         if self.usage is not None and len(self.messages) > 0:
             summary_tokens = self.usage.output
@@ -38,14 +38,6 @@ class CompactionResult(NamedTuple):
             return summary_tokens + preserved_tokens
 
         return estimate_text_tokens(self.messages)
-
-
-MORPH_COMPACTOR_MODEL = "morph-compactor"
-MORPH_COMPACTION_QUERY = (
-    "Keep only the context that is still necessary to continue this coding task accurately. "
-    "Preserve user goals, decisions, concrete file paths, commands, errors, active plans, "
-    "code changes, and unresolved blockers. Remove redundant chatter and stale details."
-)
 
 
 class CompactionSplit(NamedTuple):
@@ -60,8 +52,6 @@ def estimate_text_tokens(messages: Sequence[Message]) -> int:
         for part in msg.content:
             if isinstance(part, TextPart):
                 total_chars += len(part.text)
-    # ~4 chars per token for English; somewhat underestimates for CJK text,
-    # but this is a temporary estimate that gets corrected on the next LLM call.
     return total_chars // 4
 
 
@@ -72,12 +62,7 @@ def should_auto_compact(
     trigger_ratio: float,
     reserved_context_size: int,
 ) -> bool:
-    """Determine whether auto-compaction should be triggered.
-
-    Returns True when either condition is met (whichever fires first):
-    - Ratio-based: token_count >= max_context_size * trigger_ratio
-    - Reserved-based: token_count + reserved_context_size >= max_context_size
-    """
+    """Determine whether auto-compaction should be triggered."""
     return (
         token_count >= max_context_size * trigger_ratio
         or token_count + reserved_context_size >= max_context_size
@@ -89,25 +74,13 @@ class BaseCompactor(Protocol):
     async def compact(
         self, messages: Sequence[Message], llm: LLM, *, custom_instruction: str = ""
     ) -> CompactionResult:
-        """
-        Compact a sequence of messages into a new sequence of messages.
-
-        Args:
-            messages (Sequence[Message]): The messages to compact.
-            llm (LLM): The LLM to use for compaction.
-            custom_instruction: Optional user instruction to guide compaction focus.
-
-        Returns:
-            CompactionResult: The compacted messages and token usage from the compaction LLM call.
-
-        Raises:
-            ChatProviderError: When the chat provider returns an error.
-        """
+        """Compact a sequence of messages into a new sequence of messages."""
         ...
+
 
 if TYPE_CHECKING:
 
-    def type_check(simple: SimpleCompaction):
+    def type_check(simple: SimpleCompaction) -> None:
         _: BaseCompactor = simple
 
 
@@ -118,16 +91,10 @@ class SimpleCompaction(BaseCompactor):
     async def compact(
         self, messages: Sequence[Message], llm: LLM, *, custom_instruction: str = ""
     ) -> CompactionResult:
-        split = self._split_messages(messages)
-        if not split.to_compact:
-            return CompactionResult(messages=split.to_preserve, usage=None)
-
         compact_message, to_preserve = self.prepare(messages, custom_instruction=custom_instruction)
         if compact_message is None:
             return CompactionResult(messages=to_preserve, usage=None)
 
-        # Call kosong.step to get the compacted context
-        # TODO: set max completion tokens
         logger.debug("Compacting context...")
         result = await kosong.step(
             chat_provider=llm.chat_provider,
@@ -145,10 +112,7 @@ class SimpleCompaction(BaseCompactor):
         content: list[ContentPart] = [
             system("Previous context has been compacted. Here is the compaction output:")
         ]
-        compacted_msg = result.message
-
-        # drop thinking parts if any
-        content.extend(part for part in compacted_msg.content if not isinstance(part, ThinkPart))
+        content.extend(part for part in result.message.content if not isinstance(part, ThinkPart))
         compacted_messages: list[Message] = [Message(role="user", content=content)]
         compacted_messages.extend(to_preserve)
         return CompactionResult(messages=compacted_messages, usage=result.usage)
@@ -189,7 +153,6 @@ class SimpleCompaction(BaseCompactor):
         if not to_compact:
             return self.PrepareResult(compact_message=None, to_preserve=to_preserve)
 
-        # Create input message for compaction
         compact_message = Message(role="user", content=[])
         for i, msg in enumerate(to_compact):
             compact_message.content.append(

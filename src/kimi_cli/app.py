@@ -153,7 +153,9 @@ class KimiCLI:
         assert model is not None
         env_overrides = augment_provider_with_env_vars(provider, model)
         if compaction_provider is not None and compaction_model is not None:
-            augment_provider_with_env_vars(compaction_provider, compaction_model)
+            env_overrides.update(
+                augment_provider_with_env_vars(compaction_provider, compaction_model)
+            )
 
         # determine thinking mode
         thinking = config.default_thinking if thinking is None else thinking

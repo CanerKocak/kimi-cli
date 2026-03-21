@@ -22,6 +22,7 @@ from kosong.message import Message
 from tenacity import RetryCallState, retry_if_exception, stop_after_attempt, wait_exponential_jitter
 
 from kimi_cli.background import build_active_task_snapshot
+from kimi_cli.compactors import load_compactor
 from kimi_cli.llm import ModelCapability
 from kimi_cli.notifications import (
     NotificationView,
@@ -40,9 +41,7 @@ from kimi_cli.soul import (
 )
 from kimi_cli.soul.agent import Agent, Runtime
 from kimi_cli.soul.compaction import (
-    BaseCompactor,
     CompactionResult,
-    SimpleCompaction,
     estimate_text_tokens,
     should_auto_compact,
 )
@@ -131,7 +130,10 @@ class KimiSoul:
         self._approval = agent.runtime.approval
         self._context = context
         self._loop_control = agent.runtime.config.loop_control
-        self._compaction = self._load_compaction_provider(self._loop_control)
+        self._compaction = load_compactor(
+            self._loop_control.compaction_provider,
+            self._runtime.compaction_llm or self._runtime.llm,
+        )
 
         for tool in agent.toolset.tools:
             if tool.name == SendDMail_NAME:
@@ -162,22 +164,6 @@ class KimiSoul:
 
         self._slash_commands = self._build_slash_commands()
         self._slash_command_map = self._index_slash_commands(self._slash_commands)
-
-    @staticmethod
-    def _load_compaction_provider(loop_control: Any) -> BaseCompactor:
-        provider_path = loop_control.compaction_provider
-        if not provider_path:
-            return SimpleCompaction()
-        
-        try:
-            import importlib
-            module_name, class_name = provider_path.rsplit(".", 1)
-            module = importlib.import_module(module_name)
-            compactor_cls = getattr(module, class_name)
-            return compactor_cls()
-        except Exception as e:
-            logger.warning("Failed to load custom compaction provider {provider_path}: {e}, falling back to SimpleCompaction.", provider_path=provider_path, e=e)
-            return SimpleCompaction()
 
     @property
     def name(self) -> str:
@@ -505,23 +491,16 @@ class KimiSoul:
             if skill.flow is None:
                 logger.warning("Flow skill {name} has no flow; skipping", name=skill.name)
                 continue
-            command_name = f"{FLOW_COMMAND_PREFIX}{skill.name}"
-            if command_name in seen_names:
-                logger.warning(
-                    "Skipping prompt flow slash command /{name}: name already registered",
-                    name=command_name,
-                )
-                continue
             runner = FlowRunner(skill.flow, name=skill.name)
             commands.append(
                 SlashCommand(
-                    name=command_name,
+                    name=f"{FLOW_COMMAND_PREFIX}{skill.name}",
                     func=runner.run,
                     description=skill.description or "",
                     aliases=[],
                 )
             )
-            seen_names.add(command_name)
+            seen_names.add(f"{FLOW_COMMAND_PREFIX}{skill.name}")
 
         return commands
 

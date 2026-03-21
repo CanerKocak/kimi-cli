@@ -53,6 +53,12 @@ def model_display_name(model_name: str | None) -> str:
     return model_name
 
 
+def _looks_like_morph_config(provider: LLMProvider, model: LLMModel) -> bool:
+    if provider.type not in {"openai_legacy", "openai_responses"}:
+        return False
+    return "morph" in provider.base_url.lower() or "morph" in model.model.lower()
+
+
 def augment_provider_with_env_vars(provider: LLMProvider, model: LLMModel) -> dict[str, str]:
     """Override provider/model settings from environment variables.
 
@@ -90,6 +96,13 @@ def augment_provider_with_env_vars(provider: LLMProvider, model: LLMModel) -> di
             if api_key := os.getenv("OPENAI_API_KEY"):
                 provider.api_key = SecretStr(api_key)
                 applied["OPENAI_API_KEY"] = "******"
+            if _looks_like_morph_config(provider, model):
+                if base_url := os.getenv("MORPH_API_URL"):
+                    provider.base_url = base_url
+                    applied["MORPH_API_URL"] = base_url
+                if api_key := os.getenv("MORPH_API_KEY"):
+                    provider.api_key = SecretStr(api_key)
+                    applied["MORPH_API_KEY"] = "******"
 
         case _:
             pass

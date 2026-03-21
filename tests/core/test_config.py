@@ -31,8 +31,8 @@ def test_default_config_dump():
                 "max_steps_per_turn": 100,
                 "max_retries_per_step": 3,
                 "max_ralph_iterations": 0,
-                "compaction_model": None, 
-                "compaction_provider": None, 
+                "compaction_model": None,
+                "compaction_provider": None,
                 "reserved_context_size": 50000,
                 "compaction_trigger_ratio": 0.85,
             },
@@ -139,6 +139,11 @@ def test_load_config_compaction_model():
         '"loop_control": {"compaction_model": "compact"}}'
     )
     assert config.loop_control.compaction_model == "compact"
+
+
+def test_load_config_compaction_provider():
+    config = load_config_from_string('{"loop_control": {"compaction_provider": "morph"}}')
+    assert config.loop_control.compaction_provider == "morph"
 
 
 def test_load_config_invalid_compaction_model():
