@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, NamedTuple, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
 
+import httpx
 import kosong
-from kosong.chat_provider import TokenUsage
+from kosong.chat_provider import ChatProviderError, TokenUsage
+from kosong.chat_provider.openai_common import convert_error
 from kosong.message import Message
 from kosong.tooling.empty import EmptyToolset
 
@@ -39,6 +41,19 @@ class CompactionResult(NamedTuple):
             return summary_tokens + preserved_tokens
 
         return estimate_text_tokens(self.messages)
+
+
+MORPH_COMPACTOR_MODEL = "morph-compactor"
+MORPH_COMPACTION_QUERY = (
+    "Keep only the context that is still necessary to continue this coding task accurately. "
+    "Preserve user goals, decisions, concrete file paths, commands, errors, active plans, "
+    "code changes, and unresolved blockers. Remove redundant chatter and stale details."
+)
+
+
+class CompactionSplit(NamedTuple):
+    to_compact: Sequence[Message]
+    to_preserve: Sequence[Message]
 
 
 def estimate_text_tokens(messages: Sequence[Message]) -> int:
@@ -94,10 +109,137 @@ class Compaction(Protocol):
         ...
 
 
+class NativeCompactor(Protocol):
+    def matches(self, llm: LLM) -> bool: ...
+
+    async def compact(
+        self,
+        to_compact: Sequence[Message],
+        to_preserve: Sequence[Message],
+        llm: LLM,
+        *,
+        custom_instruction: str = "",
+    ) -> CompactionResult: ...
+
+
 if TYPE_CHECKING:
 
     def type_check(simple: SimpleCompaction):
         _: Compaction = simple
+
+
+def _configured_model_name(llm: LLM) -> str:
+    if llm.model_config is not None:
+        return llm.model_config.model
+    return llm.model_name
+
+
+class MorphNativeCompactor:
+    def matches(self, llm: LLM) -> bool:
+        return _configured_model_name(llm).strip().lower() == MORPH_COMPACTOR_MODEL
+
+    async def compact(
+        self,
+        to_compact: Sequence[Message],
+        to_preserve: Sequence[Message],
+        llm: LLM,
+        *,
+        custom_instruction: str = "",
+    ) -> CompactionResult:
+        provider = llm.provider_config
+        if provider is None:
+            raise ChatProviderError("Morph compaction requires provider configuration.")
+
+        headers = {
+            "Authorization": f"Bearer {provider.api_key.get_secret_value()}",
+            "Content-Type": "application/json",
+        }
+        if provider.custom_headers:
+            headers.update(provider.custom_headers)
+
+        payload: dict[str, Any] = {
+            "model": _configured_model_name(llm),
+            "messages": self._messages_to_payload(to_compact),
+            "query": self._build_query(custom_instruction),
+            "compression_ratio": 0.5,
+            "compress_system_messages": False,
+        }
+
+        endpoint = f"{provider.base_url.rstrip('/')}/compact"
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.post(endpoint, headers=headers, json=payload)
+                response.raise_for_status()
+        except httpx.HTTPError as error:
+            raise convert_error(error) from error
+
+        compacted_messages, usage = self._parse_response(response.json())
+        compacted_messages.extend(to_preserve)
+        return CompactionResult(messages=compacted_messages, usage=usage)
+
+    @staticmethod
+    def _messages_to_payload(messages: Sequence[Message]) -> list[dict[str, str]]:
+        payload: list[dict[str, str]] = []
+        for message in messages:
+            payload.append(
+                {
+                    "role": message.role,
+                    "content": message.extract_text(),
+                }
+            )
+        return payload
+
+    @staticmethod
+    def _build_query(custom_instruction: str) -> str:
+        query = MORPH_COMPACTION_QUERY
+        if custom_instruction.strip():
+            query += (
+                " Prioritize this user instruction during compaction: "
+                f"{custom_instruction.strip()}"
+            )
+        return query
+
+    @staticmethod
+    def _parse_response(payload: object) -> tuple[list[Message], TokenUsage | None]:
+        if not isinstance(payload, dict):
+            raise ChatProviderError("Morph compaction returned an invalid response payload.")
+
+        raw_messages = payload.get("messages")
+        if not isinstance(raw_messages, list):
+            output = payload.get("output")
+            if isinstance(output, str) and output:
+                return [Message(role="user", content=output)], None
+            raise ChatProviderError("Morph compaction response did not include compacted messages.")
+
+        messages: list[Message] = []
+        for raw_message in raw_messages:
+            if not isinstance(raw_message, dict):
+                raise ChatProviderError("Morph compaction returned an invalid message entry.")
+            role = raw_message.get("role")
+            content = raw_message.get("content")
+            if role not in {"system", "user", "assistant", "tool"}:
+                raise ChatProviderError("Morph compaction returned an unsupported message role.")
+            messages.append(Message.model_validate({"role": role, "content": content}))
+
+        usage_payload = payload.get("usage")
+        usage: TokenUsage | None = None
+        if isinstance(usage_payload, dict):
+            input_tokens = usage_payload.get("input_tokens")
+            output_tokens = usage_payload.get("output_tokens")
+            if isinstance(input_tokens, int) and isinstance(output_tokens, int):
+                usage = TokenUsage(input_other=input_tokens, output=output_tokens)
+
+        return messages, usage
+
+
+NATIVE_COMPACTORS: tuple[NativeCompactor, ...] = (MorphNativeCompactor(),)
+
+
+def resolve_native_compactor(llm: LLM) -> NativeCompactor | None:
+    for compactor in NATIVE_COMPACTORS:
+        if compactor.matches(llm):
+            return compactor
+    return None
 
 
 class SimpleCompaction:
@@ -107,6 +249,19 @@ class SimpleCompaction:
     async def compact(
         self, messages: Sequence[Message], llm: LLM, *, custom_instruction: str = ""
     ) -> CompactionResult:
+        split = self._split_messages(messages)
+        if not split.to_compact:
+            return CompactionResult(messages=split.to_preserve, usage=None)
+
+        native_compactor = resolve_native_compactor(llm)
+        if native_compactor is not None:
+            return await native_compactor.compact(
+                split.to_compact,
+                split.to_preserve,
+                llm,
+                custom_instruction=custom_instruction,
+            )
+
         compact_message, to_preserve = self.prepare(messages, custom_instruction=custom_instruction)
         if compact_message is None:
             return CompactionResult(messages=to_preserve, usage=None)
@@ -138,15 +293,9 @@ class SimpleCompaction:
         compacted_messages.extend(to_preserve)
         return CompactionResult(messages=compacted_messages, usage=result.usage)
 
-    class PrepareResult(NamedTuple):
-        compact_message: Message | None
-        to_preserve: Sequence[Message]
-
-    def prepare(
-        self, messages: Sequence[Message], *, custom_instruction: str = ""
-    ) -> PrepareResult:
+    def _split_messages(self, messages: Sequence[Message]) -> CompactionSplit:
         if not messages or self.max_preserved_messages <= 0:
-            return self.PrepareResult(compact_message=None, to_preserve=messages)
+            return CompactionSplit(to_compact=[], to_preserve=messages)
 
         history = list(messages)
         preserve_start_index = len(history)
@@ -159,13 +308,25 @@ class SimpleCompaction:
                     break
 
         if n_preserved < self.max_preserved_messages:
-            return self.PrepareResult(compact_message=None, to_preserve=messages)
+            return CompactionSplit(to_compact=[], to_preserve=messages)
 
         to_compact = history[:preserve_start_index]
         to_preserve = history[preserve_start_index:]
-
         if not to_compact:
-            # Let's hope this won't exceed the context size limit
+            return CompactionSplit(to_compact=[], to_preserve=to_preserve)
+        return CompactionSplit(to_compact=to_compact, to_preserve=to_preserve)
+
+    class PrepareResult(NamedTuple):
+        compact_message: Message | None
+        to_preserve: Sequence[Message]
+
+    def prepare(
+        self, messages: Sequence[Message], *, custom_instruction: str = ""
+    ) -> PrepareResult:
+        split = self._split_messages(messages)
+        to_compact = split.to_compact
+        to_preserve = split.to_preserve
+        if not to_compact:
             return self.PrepareResult(compact_message=None, to_preserve=to_preserve)
 
         # Create input message for compaction

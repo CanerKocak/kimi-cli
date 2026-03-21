@@ -1,11 +1,22 @@
 from __future__ import annotations
 
+import pytest
 from inline_snapshot import snapshot
 from kosong.chat_provider import TokenUsage
+from kosong.chat_provider.echo import EchoChatProvider
 from kosong.message import AudioURLPart, ImageURLPart, Message, VideoURLPart
+from pydantic import SecretStr
 
 import kimi_cli.prompts as prompts
-from kimi_cli.soul.compaction import CompactionResult, SimpleCompaction, should_auto_compact
+import kimi_cli.soul.compaction as compaction_module
+from kimi_cli.config import LLMModel, LLMProvider
+from kimi_cli.llm import LLM
+from kimi_cli.soul.compaction import (
+    MORPH_COMPACTION_QUERY,
+    CompactionResult,
+    SimpleCompaction,
+    should_auto_compact,
+)
 from kimi_cli.wire.types import TextPart, ThinkPart
 
 
@@ -274,3 +285,117 @@ def test_prepare_preserves_media_parts_in_recent_messages():
     # Preserved messages should keep their media parts intact
     preserved_user_msg = result.to_preserve[0]
     assert any(isinstance(p, VideoURLPart) for p in preserved_user_msg.content)
+
+
+@pytest.mark.asyncio
+async def test_compact_uses_morph_native_endpoint_and_preserves_recent_tail(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class DummyResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "messages": [
+                    {"role": "system", "content": "Retain the repo and task state."},
+                    {"role": "user", "content": "Old question"},
+                    {"role": "assistant", "content": "Old answer"},
+                ],
+                "usage": {"input_tokens": 1200, "output_tokens": 320},
+            }
+
+    class DummyAsyncClient:
+        def __init__(self, *, timeout: float) -> None:
+            captured["timeout"] = timeout
+
+        async def __aenter__(self) -> DummyAsyncClient:
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def post(
+            self, url: str, *, headers: dict[str, str], json: dict[str, object]
+        ) -> DummyResponse:
+            captured["url"] = url
+            captured["headers"] = headers
+            captured["json"] = json
+            return DummyResponse()
+
+    monkeypatch.setattr(compaction_module.httpx, "AsyncClient", DummyAsyncClient)
+
+    llm = LLM(
+        chat_provider=EchoChatProvider(),
+        max_context_size=16_000,
+        capabilities=set(),
+        model_config=LLMModel(
+            provider="morph",
+            model="morph-compactor",
+            max_context_size=1_000_000,
+        ),
+        provider_config=LLMProvider(
+            type="openai_responses",
+            base_url="https://api.morphllm.com/v1",
+            api_key=SecretStr("morph-test-key"),
+        ),
+    )
+    messages = [
+        Message(role="user", content=[TextPart(text="Old question")]),
+        Message(role="assistant", content=[TextPart(text="Old answer")]),
+        Message(
+            role="user",
+            content=[
+                TextPart(text="Latest question"),
+                VideoURLPart(video_url=VideoURLPart.VideoURL(url="data:video/mp4;base64,VID")),
+            ],
+        ),
+        Message(role="assistant", content=[TextPart(text="Latest answer")]),
+    ]
+
+    result = await SimpleCompaction(max_preserved_messages=2).compact(
+        messages,
+        llm,
+        custom_instruction="Keep mention of the current migration plan",
+    )
+
+    assert captured["url"] == "https://api.morphllm.com/v1/compact"
+    assert captured["timeout"] == 60.0
+    assert captured["headers"] == snapshot(
+        {
+            "Authorization": "Bearer morph-test-key",
+            "Content-Type": "application/json",
+        }
+    )
+    assert captured["json"] == snapshot(
+        {
+            "model": "morph-compactor",
+            "messages": [
+                {"role": "user", "content": "Old question"},
+                {"role": "assistant", "content": "Old answer"},
+            ],
+            "query": (
+                MORPH_COMPACTION_QUERY
+                + " Prioritize this user instruction during compaction: "
+                + "Keep mention of the current migration plan"
+            ),
+            "compression_ratio": 0.5,
+            "compress_system_messages": False,
+        }
+    )
+    assert result.messages == snapshot(
+        [
+            Message(role="system", content=[TextPart(text="Retain the repo and task state.")]),
+            Message(role="user", content=[TextPart(text="Old question")]),
+            Message(role="assistant", content=[TextPart(text="Old answer")]),
+            Message(
+                role="user",
+                content=[
+                    TextPart(text="Latest question"),
+                    VideoURLPart(video_url=VideoURLPart.VideoURL(url="data:video/mp4;base64,VID")),
+                ],
+            ),
+            Message(role="assistant", content=[TextPart(text="Latest answer")]),
+        ]
+    )
+    assert result.usage == TokenUsage(input_other=1200, output=320)

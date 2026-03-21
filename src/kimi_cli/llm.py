@@ -86,8 +86,23 @@ def augment_provider_with_env_vars(provider: LLMProvider, model: LLMModel) -> di
         case "openai_legacy" | "openai_responses":
             if base_url := os.getenv("OPENAI_BASE_URL"):
                 provider.base_url = base_url
+                applied["OPENAI_BASE_URL"] = base_url
             if api_key := os.getenv("OPENAI_API_KEY"):
                 provider.api_key = SecretStr(api_key)
+                applied["OPENAI_API_KEY"] = "******"
+            morph_model = model.model.lower().startswith("morph-")
+            morph_provider = "morphllm.com" in provider.base_url.lower()
+            if morph_model or morph_provider:
+                if not applied.get("OPENAI_BASE_URL") and (
+                    morph_base_url := os.getenv("MORPH_API_URL")
+                ):
+                    provider.base_url = morph_base_url
+                    applied["MORPH_API_URL"] = morph_base_url
+                if not applied.get("OPENAI_API_KEY") and (
+                    morph_api_key := os.getenv("MORPH_API_KEY")
+                ):
+                    provider.api_key = SecretStr(morph_api_key)
+                    applied["MORPH_API_KEY"] = "******"
         case _:
             pass
 
