@@ -40,6 +40,7 @@ from kimi_cli.soul import (
 )
 from kimi_cli.soul.agent import Agent, Runtime
 from kimi_cli.soul.compaction import (
+    BaseCompactor,
     CompactionResult,
     SimpleCompaction,
     estimate_text_tokens,
@@ -130,7 +131,7 @@ class KimiSoul:
         self._approval = agent.runtime.approval
         self._context = context
         self._loop_control = agent.runtime.config.loop_control
-        self._compaction = SimpleCompaction()  # TODO: maybe configurable and composable
+        self._compaction = self._load_compaction_provider(self._loop_control)
 
         for tool in agent.toolset.tools:
             if tool.name == SendDMail_NAME:
@@ -161,6 +162,22 @@ class KimiSoul:
 
         self._slash_commands = self._build_slash_commands()
         self._slash_command_map = self._index_slash_commands(self._slash_commands)
+
+    @staticmethod
+    def _load_compaction_provider(loop_control: Any) -> BaseCompactor:
+        provider_path = loop_control.compaction_provider
+        if not provider_path:
+            return SimpleCompaction()
+        
+        try:
+            import importlib
+            module_name, class_name = provider_path.rsplit(".", 1)
+            module = importlib.import_module(module_name)
+            compactor_cls = getattr(module, class_name)
+            return compactor_cls()
+        except Exception as e:
+            logger.warning("Failed to load custom compaction provider {provider_path}: {e}, falling back to SimpleCompaction.", provider_path=provider_path, e=e)
+            return SimpleCompaction()
 
     @property
     def name(self) -> str:

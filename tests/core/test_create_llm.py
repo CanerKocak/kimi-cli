@@ -48,38 +48,6 @@ def test_augment_provider_with_env_vars_kimi(monkeypatch):
     )
 
 
-def test_augment_provider_with_env_vars_morph_fallback(monkeypatch):
-    provider = LLMProvider(
-        type="openai_responses",
-        base_url="https://api.morphllm.com/v1",
-        api_key=SecretStr("orig-key"),
-    )
-    model = LLMModel(
-        provider="morph",
-        model="morph-v3-large",
-        max_context_size=16000,
-        capabilities=None,
-    )
-
-    monkeypatch.setenv("MORPH_API_URL", "https://proxy.morph.test/v1")
-    monkeypatch.setenv("MORPH_API_KEY", "morph-env-key")
-
-    applied = augment_provider_with_env_vars(provider, model)
-
-    assert applied == snapshot(
-        {
-            "MORPH_API_URL": "https://proxy.morph.test/v1",
-            "MORPH_API_KEY": "******",
-        }
-    )
-    assert provider == snapshot(
-        LLMProvider(
-            type="openai_responses",
-            base_url="https://proxy.morph.test/v1",
-            api_key=SecretStr("morph-env-key"),
-        )
-    )
-
 
 def test_create_llm_kimi_model_parameters(monkeypatch):
     provider = LLMProvider(

@@ -80,6 +80,8 @@ class LoopControl(BaseModel):
     """Extra iterations after the first turn in Ralph mode. Use -1 for unlimited."""
     compaction_model: str | None = Field(default=None)
     """Optional separate model name to use for compaction."""
+    compaction_provider: str | None = Field(default=None)
+    """Optional import path for a custom Compaction implementation."""
     reserved_context_size: int = Field(default=50_000, ge=1000)
     """Reserved token count for LLM response generation. Auto-compaction triggers when
     either context_tokens + reserved_context_size >= max_context_size or
